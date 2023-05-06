@@ -1,0 +1,427 @@
+---
+title: "uni_multivariable_nomogram"
+author: "bolin"
+date: "9/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Initial Setup and Package Loads in R 
+
+Packages used for the analysis.
+```{r initial_setup, cache=FALSE, message = FALSE, warning = FALSE}
+library(glmnet);library(survival);library(survminer);library(readxl);library(ggplot2); library(GGally)
+library(knitr); library(magrittr)
+library(skimr); library(Hmisc); library(Epi); library(vcd)
+library(tidyverse); library(compareC); library(survMisc); library(lattice); library(Formula); library(SparseM);library("survey");
+library("SvyNom");library("rms")
+
+
+## Global options
+
+options(max.print="75")
+opts_chunk$set(comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+skimr::skim_with(numeric = list(hist = NULL),
+                 integer = list(hist = NULL))
+```
+
+## Loading the all stages Data for uni-multivariable
+
+Loading raw dataset into R.
+
+Training Data from CCF with minimum and max. survival time.
+```{r train_set}
+D1 <- read.csv("D1_interaction.csv")
+D2 <- read.csv("D2_interaction.csv")
+D3 <- read.csv("D3_interaction.csv")
+D23 <- read.csv("D23_interaction.csv")
+D23_stage1 <- read.csv("D23_stage1_interaction.csv")
+D23_stage2 <- read.csv("D23_stage2_interaction.csv")
+
+D1 <- D1[complete.cases(D1), ]
+D2 <- D2[complete.cases(D2),]
+D3 <- D3[complete.cases(D3),]
+D23 <- D23[complete.cases(D23),]
+D23_stage1 <- D23_stage1[complete.cases(D23_stage1),]
+D23_stage2 <- D23_stage2[complete.cases(D23_stage2),]
+```
+
+
+```{r}
+## univariable
+options(max.print=600)
+covariates <- c("age","gender","subsite","PY","Tstage","Nstage","overallstage","pRiS")
+univ_formulas <- sapply(covariates,
+                        function(x) as.formula(paste('Surv(OS, OS_status)~', x)))
+                        
+univ_models <- lapply(univ_formulas, function(x){coxph(x, data =D3)})
+
+```
+
+
+
+```{r}
+## multivariable
+covariates <- c("age","gender","subsite","PY","Tstage","Nstage","pRiS","trt")
+variables = paste(covariates , collapse="+")
+
+multi_models <- coxph(as.formula(paste("Surv(OS, OS_status)~", variables)),data = D3)
+summary(multi_models)
+```
+
+
+
+### nomogram construction
+
+```{r}
+dd <- datadist(D1)
+options(datadist = "dd")
+
+dstr2 <- svydesign (id = ~1, data = D1)
+mynom3 <- svycox.nomogram(.design = dstr2, .model =
+Surv(OS, OS_status) ~ pRiS+age+Tstage+PY+overallstage, .data = D1, pred.at = 60, fun.lab = "5-Year OS") 
+
+mynom4 <- svycox.nomogram(.design = dstr2, .model =
+Surv(OS, OS_status) ~  age+Tstage+PY+overallstage, .data = D1, pred.at = 60, fun.lab = "5-Year OS")
+```
+
+```{r}
+tiff("clinical_nomogram.tiff",width = 8, height = 6, units = 'in', res = 300)
+
+plot(mynom4$nomog)
+```
+
+```{r}
+D1$RadiomicNomogram = predict(mynom3$svy.cox, newdata = D1)
+D1$ClinicalNomogram = predict(mynom4$svy.cox,newdata = D1)
+
+D2$RadiomicNomogram = predict(mynom3$svy.cox,newdata = D2)
+D2$ClinicalNomogram = predict(mynom4$svy.cox,newdata = D2)
+
+D3$RadiomicNomogram = predict(mynom3$svy.cox,newdata = D3)
+D3$ClinicalNomogram = predict(mynom4$svy.cox,newdata = D3)
+
+D23$RadiomicNomogram = predict(mynom3$svy.cox,newdata = D23)
+D23$ClinicalNomogram = predict(mynom4$svy.cox,newdata = D23)
+```
+
+```{r}
+library(survcomp)
+c1 = concordance.index(D23$RadiomicNomogram, D23$OS, D23$OS_status, method="noether")
+c2 = concordance.index(D23$ClinicalNomogram, D23$OS, D23$OS_status, method="noether")
+cindex.comp(c1, c2)
+```
+
+
+```{r}
+## multivariable
+covariates <- c("RadiomicNomogram","ClinicalNomogram")
+variables = paste(covariates , collapse="+")
+
+multi_models <- coxph(as.formula(paste("Surv(DFS, DFS_status)~", variables)),data = D23)
+summary(multi_models)
+
+## univariable
+univ_formulas <- sapply(covariates,
+                        function(x) as.formula(paste('Surv(DFS, DFS_status)~', x)))
+                        
+univ_models <- lapply( univ_formulas, function(x){coxph(x, data =D23)})
+# Extract data 
+univ_results <- lapply(univ_models,
+                       function(x){ 
+                          x <- summary(x)
+                          p.value<-signif(x$logtest["pvalue"], digits=2)
+                          wald.test<-signif(x$wald["test"], digits=2)
+                          beta<-signif(x$coef[1], digits=2);#coeficient beta
+                          
+                          HR <-signif(x$coef[2], digits=2);#exp(beta)
+                          HR.confint.lower <- signif(x$conf.int[,"lower .95"], 2)
+                          HR.confint.upper <- signif(x$conf.int[,"upper .95"],2)
+                          HR <- paste0(HR, " (", 
+                                       HR.confint.lower, "-", HR.confint.upper, ")")
+                          Cindex <- signif(x$concordance[1], digits=2)
+                          Cindex_se <- x$concordance[2]
+                          Cindex_up <- signif(x$concordance[1]+1.96*Cindex_se, digits=2)
+                          Cindex_low <- signif(x$concordance[1]-1.96*Cindex_se, digits=2)
+                          Cindex_all <- paste0(Cindex, " (", 
+                                       Cindex_low, "-", Cindex_up, ")")
+                          res<-c( HR,Cindex_all, p.value)
+                          names(res)<-c("HR (95% CI for HR)", "Cindex (95% CI for HR)", 
+                                        " Likelihood ratio p.value")
+                          return(res)
+                          #return(exp(cbind(coef(x),confint(x))))
+                         })
+
+res <- t(as.data.frame(univ_results, check.names = FALSE))
+as.data.frame(res)
+
+```
+
+
+Calibration cph
+```{r}
+library("rms")
+f_4 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D1, time.inc = 48)
+cal_4 <- rms::calibrate(f_4,  u=48, cmethod='KM',method='boot', B = 100,m=50,surv=TRUE, time.inc=48) 
+f_6 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D1, time.inc = 72)
+cal_6 <- rms::calibrate(f_6,  u=72, cmethod='KM',method='boot', B = 100,m=50,surv=TRUE, time.inc=72) 
+f_5 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D1, time.inc = 60,identity.lty=2)
+f_5_c <- cph(Surv(DFS, DFS_status) ~ ClinicalNomogram, surv = TRUE, x = T, y = T, data = D1, time.inc = 60,identity.lty=2)
+cal_5 <- rms::calibrate(f_5,  u=60, cmethod='KM',method='boot', B = 100,m=50,surv=TRUE, time.inc=60) 
+source("HL-test.r") #HOSmer-Lemeshow test;
+y0 = HLtest(cal_4)
+y0 = paste("4-year DFS: p =",as.character(round(y0,2)), sep = " ")
+y2 = HLtest(cal_5)
+y2 = paste("5-year DFS: p =",as.character(round(y2,2)), sep = " ")
+y1 = HLtest(cal_6)
+y1 = paste("6-year DFS: p =",as.character(round(y1,2)), sep = " ")
+
+
+f_4_D2 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D2, time.inc = 48)
+cal_4_D2 <- rms::calibrate(f_4_D2,  u=48, cmethod='KM',method='boot', B = 90,m=60,surv=TRUE, time.inc=48) 
+f_6_D2 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D2, time.inc = 72)
+cal_6_D2 <- rms::calibrate(f_6_D2,  u=72, cmethod='KM',method='boot', B = 90,m=60,surv=TRUE, time.inc=72) 
+f_5_D2 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D2, time.inc = 60,identity.lty=2)
+f_5_D2_c <- cph(Surv(DFS, DFS_status) ~ ClinicalNomogram, surv = TRUE, x = T, y = T, data = D2, time.inc = 60,identity.lty=2)
+cal_5_D2 <- rms::calibrate(f_5_D2,  u=60, cmethod='KM',method='boot', B = 90,m=60,surv=TRUE, time.inc=60) 
+y3 = HLtest(cal_4_D2)
+y3 = paste("4-year DFS: p =",as.character(round(y3,2)), sep = " ")
+y5 = HLtest(cal_5_D2)
+y5 = paste("5-year DFS: p =",as.character(round(y5,2)), sep = " ")
+y4 = HLtest(cal_6_D2)
+y4 = paste("6-year DFS: p =",as.character(round(y4,2)), sep = " ")
+
+
+f_4_D3 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D3, time.inc = 48)
+cal_4_D3 <- rms::calibrate(f_4_D3,  u=48, cmethod='KM',method='boot', B = 90,m=60,surv=TRUE, time.inc=48) 
+f_6_D3 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D3, time.inc = 72)
+cal_6_D3 <- rms::calibrate(f_6_D3,  u=72, cmethod='KM',method='boot', B = 90,m=60,surv=TRUE, time.inc=72) 
+f_5_D3 <- cph(Surv(DFS, DFS_status) ~ RadiomicNomogram, surv = TRUE, x = T, y = T, data = D3, time.inc = 60,identity.lty=2)
+f_5_D3_c <- cph(Surv(DFS, DFS_status) ~ ClinicalNomogram, surv = TRUE, x = T, y = T, data = D3, time.inc = 60,identity.lty=2)
+cal_5_D3 <- rms::calibrate(f_5_D3,  u=60, cmethod='KM',method='boot', B = 90,m=60,surv=TRUE, time.inc=60) 
+y6 = HLtest(cal_4_D3)
+y6 = paste("4-year DFS: p =",as.character(round(y6,2)), sep = " ")
+y8 = HLtest(cal_5_D3)
+y8 = paste("5-year DFS: p =",as.character(round(y8,2)), sep = " ")
+y7 = HLtest(cal_6_D3)
+y7 = paste("6-year DFS: p =",as.character(round(y7,2)), sep = " ")
+```
+
+Calibration curve D2
+```{r}
+tiff("D2_cali_DFS.tiff", units="in", width=5, height=5, res=300)
+evaluaten=50
+##4 years
+par(bty="o",pty="s", font =2,font.axis=2,font.lab=2,mfrow=c(1,1),lty=1,col=1,lwd=2)
+traincal <- val.surv(f_4_D2,S=Surv(D2$DFS,D2$DFS_status),newdata=D2, u=60, evaluate=100)
+
+res = groupkm(traincal$p, Surv(D2$DFS,D2$DFS_status), m=evaluaten, u=60, pl=T, add=F,xlim=c(0.7,1),
+              ylim=c(0.7,1),conf.int = 'FALSE',cex.axis=1,cex.lab=1,font=1,
+              xlab="Estimated DFS rate",lwd = 1,
+              ylab="Actual DFS rate",cex.subtitle=F,col="green")
+
+lines(res[,c('x','KM')],type= 'o',lwd = 2,col="green",pch = 16)
+abline(0,1,lty=2)
+##5 year
+par(bty="o",pty="s", font =2,font.axis=2,font.lab=2,mfrow=c(1,1),lty=1,col=1,lwd=2)
+traincal <- val.surv(f_5_D2,S=Surv(D2$DFS,D2$DFS_status),newdata=D2, u=65, evaluate=100)
+
+res = groupkm(traincal$p, Surv(D2$DFS,D2$DFS_status), m=evaluaten, u=65, pl=T, add=T,xlim=c(0.7,1),
+              ylim=c(0.7,1),conf.int='FALSE',cex.axis=1,cex.lab=1,font=1,
+              xlab="Estimated DFS rate",lwd = 1,
+              ylab="Actual DFS rate",cex.subtitle=F,col="red")
+
+
+lines(res[,c('x','KM')],type= 'o',lwd = 2,col="red",pch = 16)
+abline(0,1,lty=2)
+##6 years
+par(bty="o",pty="s", font =2,font.axis=2,font.lab=2,mfrow=c(1,1),lty=1,col=1,lwd=2)
+traincal <- val.surv(f_6_D2,S=Surv(D2$DFS,D2$DFS_status),newdata=D2, u=72, evaluate=50)
+
+res = groupkm(traincal$p, Surv(D2$DFS,D2$DFS_status), m=evaluaten, u=72, pl=T, add=T,xlim=c(0.7,1),
+              ylim=c(0.7,1),conf.int='FALSE',cex.axis=1,cex.lab=1,font=1,
+              xlab="Estimated DFS rate",lwd = 1,
+              ylab="Actual DFS rate",cex.subtitle=F,col="blue")
+
+lines(res[,c('x','KM')],type= 'o',lwd = 2,col="blue",pch = 16)
+abline(0,1,lty=2)
+legend(x=0.78,y=0.77,,legend=c(y3,y5,y4),col=c('green','red','blue'), lwd=3.5, cex=1,lty=c(1,1),bty = "n")
+dev.off()
+
+
+```
+
+
+Calibration curve D3
+```{r}
+tiff("D3_cali_DFS.tiff", units="in", width=5, height=5, res=300)
+evaluaten=50
+##4 years
+par(bty="o",pty="s", font =2,font.axis=2,font.lab=2,mfrow=c(1,1),lty=1,col=1,lwd=2)
+traincal <- val.surv(f_4_D3,S=Surv(D3$DFS,D3$DFS_status),newdata=D3, u=48, evaluate=100)
+
+res = groupkm(traincal$p, Surv(D3$DFS,D3$DFS_status), m=evaluaten, u=48, pl=T, add=F,xlim=c(0.7,1),
+              ylim=c(0.7,1),conf.int = 'FALSE',cex.axis=1,cex.lab=1,font=1,
+              xlab="Estimated DFS rate",lwd = 1,
+              ylab="Actual DFS rate",cex.subtitle=F,col="green")
+
+
+lines(res[,c('x','KM')],type= 'o',lwd = 2,col="green",pch = 16)
+abline(0,1,lty=2)
+##5 year
+par(bty="o",pty="s", font =2,font.axis=2,font.lab=2,mfrow=c(1,1),lty=1,col=1,lwd=2)
+traincal <- val.surv(f_5_D3,S=Surv(D3$DFS,D3$DFS_status),newdata=D3, u=60, evaluate=100)
+
+res = groupkm(traincal$p, Surv(D3$DFS,D3$DFS_status), m=evaluaten, u=60, pl=T, add=T,xlim=c(0.7,1),
+              ylim=c(0.7,1),conf.int='FALSE',cex.axis=1,cex.lab=1,font=1,
+              xlab="Estimated DFS rate",lwd = 1,
+              ylab="Actual DFS rate",cex.subtitle=F,col="red")
+
+
+lines(res[,c('x','KM')],type= 'o',lwd = 2,col="red",pch = 16)
+abline(0,1,lty=2)
+##6 years
+par(bty="o",pty="s", font =2,font.axis=2,font.lab=2,mfrow=c(1,1),lty=1,col=1,lwd=2)
+traincal <- val.surv(f_6_D3,S=Surv(D3$DFS,D3$DFS_status),newdata=D3, u=72, evaluate=100)
+
+res = groupkm(traincal$p, Surv(D3$DFS,D3$DFS_status), m=evaluaten, u=72, pl=T, add=T,xlim=c(0.7,1),
+              ylim=c(0.7,1),conf.int='FALSE',cex.axis=1,cex.lab=1,font=1,
+              xlab="Estimated DFS rate",lwd = 1,
+              ylab="Actual DFS rate",cex.subtitle=F,col="blue")
+
+lines(res[,c('x','KM')],type= 'o',lwd = 2,col="blue",pch = 16)
+abline(0,1,lty=2)
+legend(x=0.78,y=0.77,,legend=c(y6,y8,y7),col=c('green','red','blue'), lwd=3.5, cex=1,lty=c(1,1),bty = "n")
+dev.off()
+```
+
+
+```{r decision curve D2,fig.height= 4, fig.width=6}
+source('dca.R')
+tiff("D2_decision_OS.tiff", units="in", width=5, height=5, res=300)
+#dev.new()
+dcs <- D2[,c(2,3)]
+dcs_sta<- dcs[,2]
+dcs_sta[which((dcs[,1]>(48))&(dcs[,2]==1))] <- 0
+
+par(bty="o",pty="s", font =2,font.axis=2,font.lab=2,mfrow=c(1,1),lwd=3,lty=1,col=1)
+#radiomic nomogram
+dca.D2  <- dca(yvar= dcs_sta, xmatrix=1-survest(f_4_D2,newdata=D2,times = 48)$surv, prob="Y",ymin=-0.1,ymax=0.1,xstop=0.4) 
+
+D2.xindex<-dca.D2$threshold
+D2.yindex<-dca.D2$modelp1
+
+#clinical nomogram
+dca.D2_c   <- dca(yvar= dcs_sta, xmatrix=1-survest(f_5_D2_c,newdata=D2,times = 72)$surv, prob="Y",ymin=-0.1,ymax=0.1,xstop=0.4) 
+
+D2_c.xindex<-dca.D2_c$threshold
+D2_c.yindex<-dca.D2_c$modelp1
+
+plot(xlim=c(0,40),ylim=c(-0.1,0.1),x=dca.D2$threshold,y=dca.D2$none, 
+     col="black",lwd=2,type = "l",
+     xlab = "Threshold Probability(%)", ylab= "Net benefit",
+     cex=1,cex.axis=1,cex.lab=1)
+lines(x=D2.xindex, y=D2.yindex,col="#FF0B97",lwd=2,type = "l")
+lines(x=D2_c.xindex, y=D2_c.yindex,col="#008000",lwd=2,type = "l")
+lines(x=dca.D2$threshold, y=dca.D2$all,col="blue",lwd=2,type = "l")
+legend("bottomright",bty="n",cex=1,legend=c("None","All","Radiomic Nomogram","Clinical Nomogram"), col=c("black","blue","#FF0B97","#008000"),lwd=2)
+```
+
+
+```{r decision curve D3,fig.height= 4, fig.width=6}
+source('dca.R')
+tiff("D3_decision_OS.tiff", units="in", width=5, height=5, res=300)
+#dev.new()
+dcs <- D3[,c(2,3)]
+dcs_sta<- dcs[,2]
+dcs_sta[which((dcs[,1]>(72))&(dcs[,2]==1))] <- 0
+
+par(bty="o",pty="s", font =2,font.axis=2,font.lab=2,mfrow=c(1,1),lwd=3,lty=1,col=1)
+#radiomic nomogram
+dca.D3  <- dca(yvar= dcs_sta, xmatrix=1-survest(f_6_D3,newdata=D3,times = 72)$surv, prob="Y",ymin=-0.1,ymax=0.1,xstop=0.4) 
+
+D3.xindex<-dca.D3$threshold
+D3.yindex<-dca.D3$modelp1
+
+#clinical nomogram
+dca.D3_c   <- dca(yvar= dcs_sta, xmatrix=1-survest(f_5_D3_c,newdata=D3,times = 60)$surv, prob="Y",ymin=-0.1,ymax=0.1,xstop=0.4) 
+
+D3_c.xindex<-dca.D3_c$threshold
+D3_c.yindex<-dca.D3_c$modelp1
+
+plot(xlim=c(0,40),ylim=c(-0.1,0.1),x=dca.D3$threshold,y=dca.D3$none, 
+     col="black",lwd=2,type = "l",
+     xlab = "Threshold Probability(%)", ylab= "Net benefit",
+     cex=1,cex.axis=1,cex.lab=1)
+lines(x=D3.xindex, y=D3.yindex,col="#FF0B97",lwd=2,type = "l")
+lines(x=D3_c.xindex, y=D3_c.yindex,col="#008000",lwd=2,type = "l")
+lines(x=dca.D3$threshold, y=dca.D3$all,col="blue",lwd=2,type = "l")
+legend("bottomright",bty="n",cex=1,legend=c("None","All","Radiomic Nomogram","Clinical Nomogram"), col=c("black","blue","#FF0B97","#008000"),lwd=2)
+```
+
+
+```{r}
+write.table(rbind(train1[,c(2,3,31)], validation1[,c(2,3,31)]),"C:/Users/Bolin/Documents/MATLAB/hn002_nomogram.csv", sep=",",  col.names=FALSE,row.names=FALSE)
+```
+
+
+# time dependent ROC
+```{r}
+library(survivalROC)
+tiff("D2_TDROC_6OS.tiff", units="in", width=5, height=5, res=300)
+nob1<-NROW(D2$pRiS)
+t.1<-survivalROC(Stime = D2$OS,status = D2$OS_status,(D2$pRiS),predict.time = 72,span=0.001*nob1^(-0.2))
+x1 = round(t.1$AUC,3)
+x1 = paste("pRiS:",as.character(x1), sep = " ")
+
+t.2<-survivalROC(Stime = D2$OS,status = D2$OS_status,(D2$RadiomicNomogram),predict.time = 72,span=0.001*nob1^(-0.2))
+x2 = round(t.2$AUC,3)
+x2 = paste("Radiomic Nomogram:",as.character(x2), sep = " ")
+
+t.3<-survivalROC(Stime = D2$OS,status = D2$OS_status,(D2$ClinicalNomogram),predict.time = 72,span=0.001*nob1^(-0.2))
+x3 = round(t.3$AUC,3)
+x3 = paste("Clinical Nomogram:",as.character(x3), sep = " ")
+
+plot(t.1$FP, t.1$TP, type="l", xlim=c(0,1), ylim=c(0,1),xlab = c("False positive rate (%)"),ylab="True positive rate (%)"
+     , lwd = 2, cex.lab=1.5, col = "#000000",main="D2-6-year OS")
+legend("bottomright", legend=c(x1,x2,x3), col =  c("#000000", "#F0E442", "red"),lwd=2, cex=1.2)
+lines(c(0,1), c(0,1), lty = 6,col = rgb(113/255,150/255,159/255),lwd=2)#画45度基
+lines(t.2$FP,t.2$TP,lty = 1,lwd =2, col = "#F0E442")
+lines(t.3$FP,t.3$TP,lty = 1,lwd =2, col = "red")
+```
+
+# delong's test
+```{r}
+library(pROC)
+OS_train <- validation1[,c(4,5)]
+OS_train_sta<- OS_train[,2]
+OS_train_sta[which((OS_train[,1]>(60))&(OS_train[,2]==1))] <- 0
+```
+
+```{r}
+roc1 <- roc(OS_train_sta, validation1$RadiomicNomogram)
+roc2 <- roc(OS_train_sta, validation1$ClinicalNomogram)
+roc.test(roc1, roc2,method="delong",paired=TRUE)
+```
+
+# Treatment interaction test
+```{r}
+D23_interaction <- read.csv("D23_interaction.csv")
+coxph(Surv(DFS, DFS_status)~trt+predictive_labels+predictive_labels*trt,data = D23_interaction)
+```
+
+```{r}
+D23_stage1_interaction <- read.csv("D23_stage1_interaction.csv")
+coxph(Surv(DFS, DFS_status)~trt+predictive_labels+predictive_labels*trt,data = D23_stage1_interaction)
+```
+
+```{r}
+D23_stage2_interaction <- read.csv("D23_stage2_interaction.csv")
+coxph(Surv(DFS, DFS_status)~trt+predictive_labels+predictive_labels*trt,data = D23_stage2_interaction)
+```
+
